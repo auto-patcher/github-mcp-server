@@ -1539,3 +1539,385 @@ func Test_ProjectsWrite_CreateProjectStatusUpdate(t *testing.T) {
 		assert.Equal(t, "AT_RISK", response["status"])
 	})
 }
+
+// Tests for new project field write operations.
+
+func Test_ProjectsWrite_CreateProjectField(t *testing.T) {
+	toolDef := ProjectsWrite(translations.NullTranslationHelper)
+
+	t.Run("success create TEXT field for org", func(t *testing.T) {
+		gqlMockedClient := githubv4mock.NewMockedHTTPClient(
+			// Mock resolve project node ID (org).
+			githubv4mock.NewQueryMatcher(
+				struct {
+					Organization struct {
+						ProjectV2 struct {
+							ID githubv4.ID
+						} `graphql:"projectV2(number: $projectNumber)"`
+					} `graphql:"organization(login: $owner)"`
+				}{},
+				map[string]any{
+					"owner":         githubv4.String("octo-org"),
+					"projectNumber": githubv4.Int(1),
+				},
+				githubv4mock.DataResponse(map[string]any{
+					"organization": map[string]any{
+						"projectV2": map[string]any{
+							"id": "PVT_proj1",
+						},
+					},
+				}),
+			),
+			// Mock createProjectV2Field mutation.
+			githubv4mock.NewMutationMatcher(
+				struct {
+					CreateProjectV2Field struct {
+						ProjectV2Field struct {
+							ProjectV2Field struct {
+								ID       string
+								Name     string
+								DataType string
+							} `graphql:"... on ProjectV2Field"`
+							ProjectV2SingleSelectField struct {
+								ID      string
+								Name    string
+								Options []struct {
+									ID   string
+									Name string
+								}
+							} `graphql:"... on ProjectV2SingleSelectField"`
+						} `graphql:"projectV2Field"`
+					} `graphql:"createProjectV2Field(input: $input)"`
+				}{},
+				githubv4.CreateProjectV2FieldInput{
+					ProjectID: githubv4.ID("PVT_proj1"),
+					DataType:  githubv4.ProjectV2CustomFieldType("TEXT"),
+					Name:      githubv4.String("Priority"),
+				},
+				nil,
+				githubv4mock.DataResponse(map[string]any{
+					"createProjectV2Field": map[string]any{
+						"projectV2Field": map[string]any{
+							"id":       "PVTF_field1",
+							"name":     "Priority",
+							"dataType": "TEXT",
+						},
+					},
+				}),
+			),
+		)
+
+		// REST mock for listProjectFieldsRaw re-fetch.
+		restFields := []map[string]any{
+			{"id": 101, "node_id": "PVTF_field1", "name": "Priority", "data_type": "TEXT"},
+		}
+		restMockedClient := MockHTTPClientWithHandlers(map[string]http.HandlerFunc{
+			GetOrgsProjectsV2FieldsByProject: mockResponse(t, http.StatusOK, restFields),
+		})
+
+		gqlClient := githubv4.NewClient(gqlMockedClient)
+		deps := BaseDeps{
+			Client:    mustNewGHClient(t, restMockedClient),
+			GQLClient: gqlClient,
+		}
+		handler := toolDef.Handler(deps)
+		request := createMCPRequest(map[string]any{
+			"method":         "create_project_field",
+			"owner":          "octo-org",
+			"owner_type":     "org",
+			"project_number": float64(1),
+			"name":           "Priority",
+			"data_type":      "TEXT",
+		})
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+
+		textContent := getTextResult(t, result)
+		var response map[string]any
+		err = json.Unmarshal([]byte(textContent.Text), &response)
+		require.NoError(t, err)
+		assert.Equal(t, "Priority", response["name"])
+	})
+
+	t.Run("missing required parameter name", func(t *testing.T) {
+		gqlMockedClient := githubv4mock.NewMockedHTTPClient()
+		gqlClient := githubv4.NewClient(gqlMockedClient)
+		deps := BaseDeps{
+			Client:    mustNewGHClient(t, MockHTTPClientWithHandlers(map[string]http.HandlerFunc{})),
+			GQLClient: gqlClient,
+		}
+		handler := toolDef.Handler(deps)
+		request := createMCPRequest(map[string]any{
+			"method":         "create_project_field",
+			"owner":          "octo-org",
+			"owner_type":     "org",
+			"project_number": float64(1),
+			"data_type":      "TEXT",
+		})
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+		require.NoError(t, err)
+		require.True(t, result.IsError)
+		textContent := getTextResult(t, result)
+		assert.Contains(t, textContent.Text, "missing required parameter: name")
+	})
+
+	t.Run("invalid data_type", func(t *testing.T) {
+		gqlMockedClient := githubv4mock.NewMockedHTTPClient()
+		gqlClient := githubv4.NewClient(gqlMockedClient)
+		deps := BaseDeps{
+			Client:    mustNewGHClient(t, MockHTTPClientWithHandlers(map[string]http.HandlerFunc{})),
+			GQLClient: gqlClient,
+		}
+		handler := toolDef.Handler(deps)
+		request := createMCPRequest(map[string]any{
+			"method":         "create_project_field",
+			"owner":          "octo-org",
+			"owner_type":     "org",
+			"project_number": float64(1),
+			"name":           "Priority",
+			"data_type":      "BOOLEAN",
+		})
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+		require.NoError(t, err)
+		require.True(t, result.IsError)
+		textContent := getTextResult(t, result)
+		assert.Contains(t, textContent.Text, "invalid data_type")
+	})
+}
+
+func Test_ProjectsWrite_AddProjectFieldOption(t *testing.T) {
+	toolDef := ProjectsWrite(translations.NullTranslationHelper)
+
+	t.Run("success add option to single-select field", func(t *testing.T) {
+		// REST mock: list project fields to resolve field node_id.
+		restFields := []map[string]any{
+			{"id": 201, "node_id": "PVTSSF_field2", "name": "Status", "data_type": "single_select"},
+		}
+		restMockedClient := MockHTTPClientWithHandlers(map[string]http.HandlerFunc{
+			GetOrgsProjectsV2FieldsByProject: mockResponse(t, http.StatusOK, restFields),
+		})
+
+		// GQL mock: addProjectV2SingleSelectFieldOption mutation.
+		gqlMockedClient := githubv4mock.NewMockedHTTPClient(
+			githubv4mock.NewMutationMatcher(
+				struct {
+					AddProjectV2SingleSelectFieldOption struct {
+						ProjectV2SingleSelectField struct {
+							ID      string
+							Name    string
+							Options []struct {
+								ID    string
+								Name  string
+								Color string
+							}
+						}
+					} `graphql:"addProjectV2SingleSelectFieldOption(input: $input)"`
+				}{},
+				AddProjectV2SingleSelectFieldOptionInput{
+					FieldID: githubv4.ID("PVTSSF_field2"),
+					Name:    githubv4.String("Blocked"),
+					Color:   githubv4.String("RED"),
+				},
+				nil,
+				githubv4mock.DataResponse(map[string]any{
+					"addProjectV2SingleSelectFieldOption": map[string]any{
+						"projectV2SingleSelectField": map[string]any{
+							"id":   "PVTSSF_field2",
+							"name": "Status",
+							"options": []map[string]any{
+								{"id": "opt1", "name": "Done", "color": "GREEN"},
+								{"id": "opt2", "name": "Blocked", "color": "RED"},
+							},
+						},
+					},
+				}),
+			),
+		)
+
+		gqlClient := githubv4.NewClient(gqlMockedClient)
+		deps := BaseDeps{
+			Client:    mustNewGHClient(t, restMockedClient),
+			GQLClient: gqlClient,
+		}
+		handler := toolDef.Handler(deps)
+		request := createMCPRequest(map[string]any{
+			"method":         "add_project_field_option",
+			"owner":          "octo-org",
+			"owner_type":     "org",
+			"project_number": float64(1),
+			"field_id":       float64(201),
+			"option_name":    "Blocked",
+			"color":          "RED",
+		})
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+
+		textContent := getTextResult(t, result)
+		var response map[string]any
+		err = json.Unmarshal([]byte(textContent.Text), &response)
+		require.NoError(t, err)
+		opts, ok := response["options"].([]any)
+		require.True(t, ok)
+		assert.Len(t, opts, 2)
+	})
+
+	t.Run("field not found", func(t *testing.T) {
+		restFields := []map[string]any{
+			{"id": 300, "node_id": "PVTF_other", "name": "Title", "data_type": "TEXT"},
+		}
+		restMockedClient := MockHTTPClientWithHandlers(map[string]http.HandlerFunc{
+			GetOrgsProjectsV2FieldsByProject: mockResponse(t, http.StatusOK, restFields),
+		})
+		gqlMockedClient := githubv4mock.NewMockedHTTPClient()
+		gqlClient := githubv4.NewClient(gqlMockedClient)
+		deps := BaseDeps{
+			Client:    mustNewGHClient(t, restMockedClient),
+			GQLClient: gqlClient,
+		}
+		handler := toolDef.Handler(deps)
+		request := createMCPRequest(map[string]any{
+			"method":         "add_project_field_option",
+			"owner":          "octo-org",
+			"owner_type":     "org",
+			"project_number": float64(1),
+			"field_id":       float64(999),
+			"option_name":    "New",
+		})
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+		require.NoError(t, err)
+		require.True(t, result.IsError)
+		textContent := getTextResult(t, result)
+		assert.Contains(t, textContent.Text, "not found in project")
+	})
+
+	t.Run("invalid color", func(t *testing.T) {
+		gqlMockedClient := githubv4mock.NewMockedHTTPClient()
+		gqlClient := githubv4.NewClient(gqlMockedClient)
+		deps := BaseDeps{
+			Client:    mustNewGHClient(t, MockHTTPClientWithHandlers(map[string]http.HandlerFunc{})),
+			GQLClient: gqlClient,
+		}
+		handler := toolDef.Handler(deps)
+		request := createMCPRequest(map[string]any{
+			"method":         "add_project_field_option",
+			"owner":          "octo-org",
+			"owner_type":     "org",
+			"project_number": float64(1),
+			"field_id":       float64(201),
+			"option_name":    "New",
+			"color":          "RAINBOW",
+		})
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+		require.NoError(t, err)
+		require.True(t, result.IsError)
+		textContent := getTextResult(t, result)
+		assert.Contains(t, textContent.Text, "invalid color")
+	})
+}
+
+func Test_ProjectsWrite_DeleteProjectField(t *testing.T) {
+	toolDef := ProjectsWrite(translations.NullTranslationHelper)
+
+	t.Run("success delete field", func(t *testing.T) {
+		// REST mock: list project fields to resolve field node_id.
+		restFields := []map[string]any{
+			{"id": 401, "node_id": "PVTF_field4", "name": "Notes", "data_type": "TEXT"},
+		}
+		restMockedClient := MockHTTPClientWithHandlers(map[string]http.HandlerFunc{
+			GetOrgsProjectsV2FieldsByProject: mockResponse(t, http.StatusOK, restFields),
+		})
+
+		gqlMockedClient := githubv4mock.NewMockedHTTPClient(
+			githubv4mock.NewMutationMatcher(
+				struct {
+					DeleteProjectV2Field struct {
+						ClientMutationID *string
+					} `graphql:"deleteProjectV2Field(input: $input)"`
+				}{},
+				DeleteProjectV2FieldInput{
+					FieldID: githubv4.ID("PVTF_field4"),
+				},
+				nil,
+				githubv4mock.DataResponse(map[string]any{
+					"deleteProjectV2Field": map[string]any{
+						"clientMutationId": nil,
+					},
+				}),
+			),
+		)
+
+		gqlClient := githubv4.NewClient(gqlMockedClient)
+		deps := BaseDeps{
+			Client:    mustNewGHClient(t, restMockedClient),
+			GQLClient: gqlClient,
+		}
+		handler := toolDef.Handler(deps)
+		request := createMCPRequest(map[string]any{
+			"method":         "delete_project_field",
+			"owner":          "octo-org",
+			"owner_type":     "org",
+			"project_number": float64(1),
+			"field_id":       float64(401),
+		})
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+
+		textContent := getTextResult(t, result)
+		assert.Contains(t, textContent.Text, "successfully deleted")
+	})
+
+	t.Run("missing required parameter field_id", func(t *testing.T) {
+		gqlMockedClient := githubv4mock.NewMockedHTTPClient()
+		gqlClient := githubv4.NewClient(gqlMockedClient)
+		deps := BaseDeps{
+			Client:    mustNewGHClient(t, MockHTTPClientWithHandlers(map[string]http.HandlerFunc{})),
+			GQLClient: gqlClient,
+		}
+		handler := toolDef.Handler(deps)
+		request := createMCPRequest(map[string]any{
+			"method":         "delete_project_field",
+			"owner":          "octo-org",
+			"owner_type":     "org",
+			"project_number": float64(1),
+		})
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+		require.NoError(t, err)
+		require.True(t, result.IsError)
+		textContent := getTextResult(t, result)
+		assert.Contains(t, textContent.Text, "missing required parameter: field_id")
+	})
+
+	t.Run("field not found", func(t *testing.T) {
+		restFields := []map[string]any{
+			{"id": 100, "node_id": "PVTF_other", "name": "Title", "data_type": "TEXT"},
+		}
+		restMockedClient := MockHTTPClientWithHandlers(map[string]http.HandlerFunc{
+			GetOrgsProjectsV2FieldsByProject: mockResponse(t, http.StatusOK, restFields),
+		})
+		gqlMockedClient := githubv4mock.NewMockedHTTPClient()
+		gqlClient := githubv4.NewClient(gqlMockedClient)
+		deps := BaseDeps{
+			Client:    mustNewGHClient(t, restMockedClient),
+			GQLClient: gqlClient,
+		}
+		handler := toolDef.Handler(deps)
+		request := createMCPRequest(map[string]any{
+			"method":         "delete_project_field",
+			"owner":          "octo-org",
+			"owner_type":     "org",
+			"project_number": float64(1),
+			"field_id":       float64(999),
+		})
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+		require.NoError(t, err)
+		require.True(t, result.IsError)
+		textContent := getTextResult(t, result)
+		assert.Contains(t, textContent.Text, "not found in project")
+	})
+}

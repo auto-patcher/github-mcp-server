@@ -10,6 +10,35 @@
         "description": "The body of the status update (markdown). Used for 'create_project_status_update' method.",
         "type": "string"
       },
+      "color": {
+        "description": "The color for the new single-select option. Optional for 'add_project_field_option' method (default: GRAY).",
+        "enum": [
+          "BLUE",
+          "GREEN",
+          "RED",
+          "YELLOW",
+          "ORANGE",
+          "PINK",
+          "PURPLE",
+          "GRAY"
+        ],
+        "type": "string"
+      },
+      "data_type": {
+        "description": "The data type of the new field. Required for 'create_project_field' method.",
+        "enum": [
+          "TEXT",
+          "NUMBER",
+          "DATE",
+          "SINGLE_SELECT",
+          "ITERATION"
+        ],
+        "type": "string"
+      },
+      "field_id": {
+        "description": "The numeric ID of the project field. Required for 'add_project_field_option' and 'delete_project_field' methods.",
+        "type": "number"
+      },
       "field_name": {
         "description": "The name of the iteration field (e.g. 'Sprint'). Required for 'create_iteration_field' method.",
         "type": "string"
@@ -77,9 +106,27 @@
           "delete_project_item",
           "create_project_status_update",
           "create_project",
-          "create_iteration_field"
+          "create_iteration_field",
+          "create_project_field",
+          "add_project_field_option",
+          "delete_project_field"
         ],
         "type": "string"
+      },
+      "name": {
+        "description": "The name of the new field. Required for 'create_project_field' method.",
+        "type": "string"
+      },
+      "option_name": {
+        "description": "The name of the new option to add. Required for 'add_project_field_option' method.",
+        "type": "string"
+      },
+      "options": {
+        "description": "Initial option names for a SINGLE_SELECT field. Optional for 'create_project_field' method.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
       },
       "owner": {
         "description": "The project owner (user or organization login). The name is not case sensitive.",
