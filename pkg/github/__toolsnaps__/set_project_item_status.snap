@@ -1,0 +1,46 @@
+{
+  "annotations": {
+    "title": "Set project item status"
+  },
+  "description": "Set a single-select field (e.g. Status) on a GitHub Project item by human-readable option name, without requiring field or option IDs.",
+  "inputSchema": {
+    "properties": {
+      "field_name": {
+        "description": "The name of the single-select field to update (default: \"Status\").",
+        "type": "string"
+      },
+      "item_id": {
+        "description": "The numeric ID of the project item to update.",
+        "type": "number"
+      },
+      "option_name": {
+        "description": "The human-readable name of the option to set (case-insensitive).",
+        "type": "string"
+      },
+      "owner": {
+        "description": "The project owner (user or organization login).",
+        "type": "string"
+      },
+      "owner_type": {
+        "description": "Owner type (user or org). If not provided, will be automatically detected.",
+        "enum": [
+          "user",
+          "org"
+        ],
+        "type": "string"
+      },
+      "project_number": {
+        "description": "The project's number.",
+        "type": "number"
+      }
+    },
+    "required": [
+      "owner",
+      "project_number",
+      "item_id",
+      "option_name"
+    ],
+    "type": "object"
+  },
+  "name": "set_project_item_status"
+}

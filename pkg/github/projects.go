@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	ghErrors "github.com/github/github-mcp-server/pkg/errors"
@@ -2263,4 +2264,329 @@ type AddProjectV2SingleSelectFieldOptionInput struct {
 // DeleteProjectV2FieldInput is the GraphQL input for the deleteProjectV2Field mutation.
 type DeleteProjectV2FieldInput struct {
 	FieldID githubv4.ID `json:"fieldId"`
+}
+
+
+// setProjectItemStatus sets a single-select field on a project item by human-readable name.
+// It fetches all project fields, finds the field and option by case-insensitive name, then
+// calls the REST update endpoint with the resolved IDs.
+func setProjectItemStatus(ctx context.Context, client *github.Client, owner, ownerType string, projectNumber int, itemID int64, fieldName, optionName string) (*mcp.CallToolResult, any, error) {
+	// Fetch all fields to find the target field.
+	fields, resp, err := listProjectFieldsRaw(ctx, client, owner, ownerType, projectNumber, github.ListProjectsPaginationOptions{PerPage: MaxProjectsPerPage})
+	if err != nil {
+		return ghErrors.NewGitHubAPIErrorResponse(ctx, "failed to list project fields", resp, err), nil, nil
+	}
+	if resp != nil && resp.Body != nil {
+		defer func() { _ = resp.Body.Close() }()
+	}
+
+	// Find the field by case-insensitive name.
+	var targetField *ProjectField
+	for i := range fields {
+		if strings.EqualFold(fields[i].Name, fieldName) {
+			targetField = &fields[i]
+			break
+		}
+	}
+	if targetField == nil {
+		available := make([]string, 0, len(fields))
+		for _, f := range fields {
+			available = append(available, f.Name)
+		}
+		return utils.NewToolResultError(fmt.Sprintf("field %q not found; available fields: %v", fieldName, available)), nil, nil
+	}
+
+	// Find the option by case-insensitive name.
+	var optionID string
+	for _, opt := range targetField.Options {
+		if strings.EqualFold(string(opt.Name), optionName) {
+			optionID = opt.ID
+			break
+		}
+	}
+	if optionID == "" {
+		available := make([]string, 0, len(targetField.Options))
+		for _, opt := range targetField.Options {
+			available = append(available, string(opt.Name))
+		}
+		return utils.NewToolResultError(fmt.Sprintf("option %q not found in field %q; available options: %v", optionName, fieldName, available)), nil, nil
+	}
+
+	// Update the item using the existing update endpoint.
+	fieldValue := map[string]any{
+		"id":    float64(targetField.ID),
+		"value": map[string]any{"single_select_option_id": optionID},
+	}
+	return updateProjectItem(ctx, client, owner, ownerType, projectNumber, itemID, fieldValue)
+}
+
+// SetProjectItemStatus returns the tool and handler for setting a single-select field
+// (default: "Status") on a project item by human-readable option name.
+func SetProjectItemStatus(t translations.TranslationHelperFunc) inventory.ServerTool {
+	return NewTool(
+		ToolsetMetadataProjects,
+		mcp.Tool{
+			Name:        "set_project_item_status",
+			Description: t("TOOL_SET_PROJECT_ITEM_STATUS_DESCRIPTION", "Set a single-select field (e.g. Status) on a GitHub Project item by human-readable option name, without requiring field or option IDs."),
+			Annotations: &mcp.ToolAnnotations{
+				Title:        t("TOOL_SET_PROJECT_ITEM_STATUS_TITLE", "Set project item status"),
+				ReadOnlyHint: false,
+			},
+			InputSchema: &jsonschema.Schema{
+				Type: "object",
+				Properties: map[string]*jsonschema.Schema{
+					"owner_type": {
+						Type:        "string",
+						Description: "Owner type (user or org). If not provided, will be automatically detected.",
+						Enum:        []any{"user", "org"},
+					},
+					"owner": {
+						Type:        "string",
+						Description: "The project owner (user or organization login).",
+					},
+					"project_number": {
+						Type:        "number",
+						Description: "The project's number.",
+					},
+					"item_id": {
+						Type:        "number",
+						Description: "The numeric ID of the project item to update.",
+					},
+					"field_name": {
+						Type:        "string",
+						Description: "The name of the single-select field to update (default: \"Status\").",
+					},
+					"option_name": {
+						Type:        "string",
+						Description: "The human-readable name of the option to set (case-insensitive).",
+					},
+				},
+				Required: []string{"owner", "project_number", "item_id", "option_name"},
+			},
+		},
+		[]scopes.Scope{scopes.Project},
+		func(ctx context.Context, deps ToolDependencies, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
+			owner, err := RequiredParam[string](args, "owner")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+
+			ownerType, err := OptionalParam[string](args, "owner_type")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+
+			projectNumber, err := RequiredInt(args, "project_number")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+
+			itemID, err := RequiredBigInt(args, "item_id")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+
+			fieldName, err := OptionalParam[string](args, "field_name")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+			if fieldName == "" {
+				fieldName = "Status"
+			}
+
+			optionName, err := RequiredParam[string](args, "option_name")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+
+			client, err := deps.GetClient(ctx)
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+
+			if ownerType == "" {
+				ownerType, err = detectOwnerType(ctx, client, owner, projectNumber)
+				if err != nil {
+					return utils.NewToolResultError(err.Error()), nil, nil
+				}
+			}
+
+			return setProjectItemStatus(ctx, client, owner, ownerType, projectNumber, itemID, fieldName, optionName)
+		},
+	)
+}
+
+// addIssueToProject adds an issue to a GitHub Project via GraphQL and optionally sets its status.
+func addIssueToProject(ctx context.Context, client *github.Client, gqlClient *githubv4.Client, issueOwner, issueRepo string, issueNumber int, projectOwner, ownerType string, projectNumber int, status string) (*mcp.CallToolResult, any, error) {
+	// Step 1: Resolve the issue to a GraphQL node ID.
+	issueNodeID, err := resolveIssueNodeID(ctx, gqlClient, issueOwner, issueRepo, issueNumber)
+	if err != nil {
+		return utils.NewToolResultError(fmt.Sprintf("failed to resolve issue: %v", err)), nil, nil
+	}
+
+	// Step 2: Resolve the project to a GraphQL node ID.
+	projectNodeID, err := resolveProjectNodeID(ctx, gqlClient, projectOwner, ownerType, projectNumber)
+	if err != nil {
+		return utils.NewToolResultError(err.Error()), nil, nil
+	}
+
+	// Step 3: Add the issue to the project via GraphQL mutation.
+	var mutation struct {
+		AddProjectV2ItemByID struct {
+			Item struct {
+				ID             githubv4.ID
+				FullDatabaseID string `graphql:"fullDatabaseId"`
+			}
+		} `graphql:"addProjectV2ItemById(input: $input)"`
+	}
+
+	input := githubv4.AddProjectV2ItemByIdInput{
+		ProjectID: projectNodeID,
+		ContentID: issueNodeID,
+	}
+
+	if err := gqlClient.Mutate(ctx, &mutation, input, nil); err != nil {
+		return utils.NewToolResultError(fmt.Sprintf(ProjectAddFailedError+": %v", err)), nil, nil
+	}
+
+	addedItemNodeID := mutation.AddProjectV2ItemByID.Item.ID
+	fullDatabaseID := mutation.AddProjectV2ItemByID.Item.FullDatabaseID
+
+	// Step 4: Optionally set the status.
+	if status != "" {
+		if fullDatabaseID == "" {
+			return utils.NewToolResultError("item was added but could not determine item ID to set status"), nil, nil
+		}
+		addedItemID, err := strconv.ParseInt(fullDatabaseID, 10, 64)
+		if err != nil {
+			return utils.NewToolResultError(fmt.Sprintf("item was added but could not parse item ID %q: %v", fullDatabaseID, err)), nil, nil
+		}
+		statusResult, payload, statusErr := setProjectItemStatus(ctx, client, projectOwner, ownerType, projectNumber, addedItemID, "Status", status)
+		if statusErr != nil || (statusResult != nil && statusResult.IsError) {
+			return statusResult, payload, statusErr
+		}
+	}
+
+	result := map[string]any{
+		"id": addedItemNodeID,
+	}
+	if fullDatabaseID != "" {
+		result["full_database_id"] = fullDatabaseID
+		if itemID, parseErr := strconv.ParseInt(fullDatabaseID, 10, 64); parseErr == nil {
+			result["item_id"] = itemID
+		}
+	}
+
+	r, marshalErr := json.Marshal(result)
+	if marshalErr != nil {
+		return nil, nil, fmt.Errorf("failed to marshal response: %w", marshalErr)
+	}
+	return utils.NewToolResultText(string(r)), nil, nil
+}
+
+// AddIssueToProject returns the tool and handler for adding an issue to a GitHub Project
+// and optionally setting its status in a single call.
+func AddIssueToProject(t translations.TranslationHelperFunc) inventory.ServerTool {
+	return NewTool(
+		ToolsetMetadataProjects,
+		mcp.Tool{
+			Name:        "add_issue_to_project",
+			Description: t("TOOL_ADD_ISSUE_TO_PROJECT_DESCRIPTION", "Add an issue to a GitHub Project and optionally set its status field in a single call."),
+			Annotations: &mcp.ToolAnnotations{
+				Title:        t("TOOL_ADD_ISSUE_TO_PROJECT_TITLE", "Add issue to project"),
+				ReadOnlyHint: false,
+			},
+			InputSchema: &jsonschema.Schema{
+				Type: "object",
+				Properties: map[string]*jsonschema.Schema{
+					"owner": {
+						Type:        "string",
+						Description: "The owner of the repository containing the issue.",
+					},
+					"repo": {
+						Type:        "string",
+						Description: "The repository name containing the issue.",
+					},
+					"issue_number": {
+						Type:        "number",
+						Description: "The issue number to add to the project.",
+					},
+					"owner_type": {
+						Type:        "string",
+						Description: "Project owner type (user or org). If not provided, will be automatically detected.",
+						Enum:        []any{"user", "org"},
+					},
+					"project_owner": {
+						Type:        "string",
+						Description: "The owner (user or organization) of the project.",
+					},
+					"project_number": {
+						Type:        "number",
+						Description: "The project's number.",
+					},
+					"status": {
+						Type:        "string",
+						Description: "Optional: human-readable status option name to set on the item after adding (e.g. \"In Progress\").",
+					},
+				},
+				Required: []string{"owner", "repo", "issue_number", "project_owner", "project_number"},
+			},
+		},
+		[]scopes.Scope{scopes.Project},
+		func(ctx context.Context, deps ToolDependencies, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
+			owner, err := RequiredParam[string](args, "owner")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+
+			repo, err := RequiredParam[string](args, "repo")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+
+			issueNumber, err := RequiredInt(args, "issue_number")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+
+			projectOwner, err := RequiredParam[string](args, "project_owner")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+
+			ownerType, err := OptionalParam[string](args, "owner_type")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+
+			projectNumber, err := RequiredInt(args, "project_number")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+
+			status, err := OptionalParam[string](args, "status")
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+
+			client, err := deps.GetClient(ctx)
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+
+			gqlClient, err := deps.GetGQLClient(ctx)
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
+			}
+
+			if ownerType == "" {
+				ownerType, err = detectOwnerType(ctx, client, projectOwner, projectNumber)
+				if err != nil {
+					return utils.NewToolResultError(err.Error()), nil, nil
+				}
+			}
+
+			return addIssueToProject(ctx, client, gqlClient, owner, repo, issueNumber, projectOwner, ownerType, projectNumber, status)
+		},
+	)
 }

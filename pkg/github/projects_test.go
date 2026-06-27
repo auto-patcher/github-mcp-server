@@ -1921,3 +1921,431 @@ func Test_ProjectsWrite_DeleteProjectField(t *testing.T) {
 		assert.Contains(t, textContent.Text, "not found in project")
 	})
 }
+
+
+func Test_SetProjectItemStatus(t *testing.T) {
+	t.Parallel()
+
+	toolDef := SetProjectItemStatus(translations.NullTranslationHelper)
+
+	// Verify tool definition once.
+	require.NoError(t, toolsnaps.Test(toolDef.Tool.Name, toolDef.Tool))
+
+	assert.Equal(t, "set_project_item_status", toolDef.Tool.Name)
+	assert.NotEmpty(t, toolDef.Tool.Description)
+	inputSchema := toolDef.Tool.InputSchema.(*jsonschema.Schema)
+	assert.Contains(t, inputSchema.Properties, "owner")
+	assert.Contains(t, inputSchema.Properties, "project_number")
+	assert.Contains(t, inputSchema.Properties, "item_id")
+	assert.Contains(t, inputSchema.Properties, "field_name")
+	assert.Contains(t, inputSchema.Properties, "option_name")
+	assert.ElementsMatch(t, inputSchema.Required, []string{"owner", "project_number", "item_id", "option_name"})
+
+	t.Run("success sets status by name", func(t *testing.T) {
+		t.Parallel()
+
+		fields := []map[string]any{
+			{
+				"id":        float64(101),
+				"name":      "Status",
+				"data_type": "single_select",
+				"options": []map[string]any{
+					{"id": "opt_todo", "name": "Todo"},
+					{"id": "opt_in_progress", "name": "In Progress"},
+					{"id": "opt_done", "name": "Done"},
+				},
+			},
+		}
+		updatedItem := map[string]any{
+			"id":           float64(5001),
+			"node_id":      "PVTI_5001",
+			"content_type": "Issue",
+		}
+
+		mockedClient := MockHTTPClientWithHandlers(map[string]http.HandlerFunc{
+			GetUsersProjectsV2FieldsByUsernameByProject:          mockResponse(t, http.StatusOK, fields),
+			PatchUsersProjectsV2ItemsByUsernameByProjectByItemID: mockResponse(t, http.StatusOK, updatedItem),
+		})
+
+		client := mustNewGHClient(t, mockedClient)
+		deps := BaseDeps{Client: client}
+		handler := toolDef.Handler(deps)
+		request := createMCPRequest(map[string]any{
+			"owner":          "octocat",
+			"owner_type":     "user",
+			"project_number": float64(1),
+			"item_id":        float64(5001),
+			"option_name":    "In Progress",
+		})
+
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+
+		textContent := getTextResult(t, result)
+		var response map[string]any
+		require.NoError(t, json.Unmarshal([]byte(textContent.Text), &response))
+		assert.Equal(t, float64(5001), response["id"])
+	})
+
+	t.Run("field not found returns available fields", func(t *testing.T) {
+		t.Parallel()
+
+		fields := []map[string]any{
+			{"id": float64(101), "name": "Status", "data_type": "single_select", "options": []map[string]any{}},
+		}
+
+		mockedClient := MockHTTPClientWithHandlers(map[string]http.HandlerFunc{
+			GetUsersProjectsV2FieldsByUsernameByProject: mockResponse(t, http.StatusOK, fields),
+		})
+
+		client := mustNewGHClient(t, mockedClient)
+		deps := BaseDeps{Client: client}
+		handler := toolDef.Handler(deps)
+		request := createMCPRequest(map[string]any{
+			"owner":          "octocat",
+			"owner_type":     "user",
+			"project_number": float64(1),
+			"item_id":        float64(5001),
+			"field_name":     "Priority",
+			"option_name":    "High",
+		})
+
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+
+		require.NoError(t, err)
+		require.True(t, result.IsError)
+		textContent := getTextResult(t, result)
+		assert.Contains(t, textContent.Text, `"Priority" not found`)
+		assert.Contains(t, textContent.Text, "Status")
+	})
+
+	t.Run("option not found returns available options", func(t *testing.T) {
+		t.Parallel()
+
+		fields := []map[string]any{
+			{
+				"id":        float64(101),
+				"name":      "Status",
+				"data_type": "single_select",
+				"options": []map[string]any{
+					{"id": "opt_todo", "name": "Todo"},
+					{"id": "opt_done", "name": "Done"},
+				},
+			},
+		}
+
+		mockedClient := MockHTTPClientWithHandlers(map[string]http.HandlerFunc{
+			GetUsersProjectsV2FieldsByUsernameByProject: mockResponse(t, http.StatusOK, fields),
+		})
+
+		client := mustNewGHClient(t, mockedClient)
+		deps := BaseDeps{Client: client}
+		handler := toolDef.Handler(deps)
+		request := createMCPRequest(map[string]any{
+			"owner":          "octocat",
+			"owner_type":     "user",
+			"project_number": float64(1),
+			"item_id":        float64(5001),
+			"option_name":    "In Progress",
+		})
+
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+
+		require.NoError(t, err)
+		require.True(t, result.IsError)
+		textContent := getTextResult(t, result)
+		assert.Contains(t, textContent.Text, `"In Progress" not found`)
+		assert.Contains(t, textContent.Text, "Todo")
+		assert.Contains(t, textContent.Text, "Done")
+	})
+
+	t.Run("missing required parameter owner returns error", func(t *testing.T) {
+		t.Parallel()
+
+		mockedClient := MockHTTPClientWithHandlers(map[string]http.HandlerFunc{})
+		client := mustNewGHClient(t, mockedClient)
+		deps := BaseDeps{Client: client}
+		handler := toolDef.Handler(deps)
+		request := createMCPRequest(map[string]any{
+			"project_number": float64(1),
+			"item_id":        float64(5001),
+			"option_name":    "Done",
+		})
+
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+
+		require.NoError(t, err)
+		require.True(t, result.IsError)
+		textContent := getTextResult(t, result)
+		assert.Contains(t, textContent.Text, "missing required parameter: owner")
+	})
+}
+
+func Test_AddIssueToProject(t *testing.T) {
+	t.Parallel()
+
+	toolDef := AddIssueToProject(translations.NullTranslationHelper)
+
+	// Verify tool definition once.
+	require.NoError(t, toolsnaps.Test(toolDef.Tool.Name, toolDef.Tool))
+
+	assert.Equal(t, "add_issue_to_project", toolDef.Tool.Name)
+	assert.NotEmpty(t, toolDef.Tool.Description)
+	inputSchema := toolDef.Tool.InputSchema.(*jsonschema.Schema)
+	assert.Contains(t, inputSchema.Properties, "owner")
+	assert.Contains(t, inputSchema.Properties, "repo")
+	assert.Contains(t, inputSchema.Properties, "issue_number")
+	assert.Contains(t, inputSchema.Properties, "project_owner")
+	assert.Contains(t, inputSchema.Properties, "project_number")
+	assert.Contains(t, inputSchema.Properties, "status")
+	assert.ElementsMatch(t, inputSchema.Required, []string{"owner", "repo", "issue_number", "project_owner", "project_number"})
+
+	t.Run("success adds issue to project without status", func(t *testing.T) {
+		t.Parallel()
+
+		gqlMockedClient := githubv4mock.NewMockedHTTPClient(
+			// Mock resolveIssueNodeID query
+			githubv4mock.NewQueryMatcher(
+				struct {
+					Repository struct {
+						Issue struct {
+							ID githubv4.ID
+						} `graphql:"issue(number: $issueNumber)"`
+					} `graphql:"repository(owner: $owner, name: $repo)"`
+				}{},
+				map[string]any{
+					"owner":       githubv4.String("octocat"),
+					"repo":        githubv4.String("my-repo"),
+					"issueNumber": githubv4.Int(42),
+				},
+				githubv4mock.DataResponse(map[string]any{
+					"repository": map[string]any{
+						"issue": map[string]any{
+							"id": "I_issue42",
+						},
+					},
+				}),
+			),
+			// Mock resolveProjectNodeID query for user
+			githubv4mock.NewQueryMatcher(
+				struct {
+					User struct {
+						ProjectV2 struct {
+							ID githubv4.ID
+						} `graphql:"projectV2(number: $projectNumber)"`
+					} `graphql:"user(login: $owner)"`
+				}{},
+				map[string]any{
+					"owner":         githubv4.String("octocat"),
+					"projectNumber": githubv4.Int(1),
+				},
+				githubv4mock.DataResponse(map[string]any{
+					"user": map[string]any{
+						"projectV2": map[string]any{
+							"id": "PVT_project1",
+						},
+					},
+				}),
+			),
+			// Mock addProjectV2ItemById mutation
+			githubv4mock.NewMutationMatcher(
+				struct {
+					AddProjectV2ItemByID struct {
+						Item struct {
+							ID             githubv4.ID
+							FullDatabaseID string `graphql:"fullDatabaseId"`
+						}
+					} `graphql:"addProjectV2ItemById(input: $input)"`
+				}{},
+				githubv4.AddProjectV2ItemByIdInput{
+					ProjectID: githubv4.ID("PVT_project1"),
+					ContentID: githubv4.ID("I_issue42"),
+				},
+				nil,
+				githubv4mock.DataResponse(map[string]any{
+					"addProjectV2ItemById": map[string]any{
+						"item": map[string]any{
+							"id":             "PVTI_item6001",
+							"fullDatabaseId": "6001",
+						},
+					},
+				}),
+			),
+		)
+
+		restClient := MockHTTPClientWithHandlers(map[string]http.HandlerFunc{})
+		client := mustNewGHClient(t, restClient)
+		deps := BaseDeps{
+			Client:    client,
+			GQLClient: githubv4.NewClient(gqlMockedClient),
+		}
+		handler := toolDef.Handler(deps)
+		request := createMCPRequest(map[string]any{
+			"owner":          "octocat",
+			"repo":           "my-repo",
+			"issue_number":   float64(42),
+			"project_owner":  "octocat",
+			"owner_type":     "user",
+			"project_number": float64(1),
+		})
+
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+
+		textContent := getTextResult(t, result)
+		var response map[string]any
+		require.NoError(t, json.Unmarshal([]byte(textContent.Text), &response))
+		assert.Equal(t, "PVTI_item6001", response["id"])
+		assert.Equal(t, float64(6001), response["item_id"])
+	})
+
+	t.Run("success adds issue to project with status", func(t *testing.T) {
+		t.Parallel()
+
+		fields := []map[string]any{
+			{
+				"id":        float64(101),
+				"name":      "Status",
+				"data_type": "single_select",
+				"options": []map[string]any{
+					{"id": "opt_todo", "name": "Todo"},
+					{"id": "opt_in_progress", "name": "In Progress"},
+				},
+			},
+		}
+		updatedItem := map[string]any{
+			"id":      float64(6001),
+			"node_id": "PVTI_item6001",
+		}
+
+		gqlMockedClient := githubv4mock.NewMockedHTTPClient(
+			// Mock resolveIssueNodeID query
+			githubv4mock.NewQueryMatcher(
+				struct {
+					Repository struct {
+						Issue struct {
+							ID githubv4.ID
+						} `graphql:"issue(number: $issueNumber)"`
+					} `graphql:"repository(owner: $owner, name: $repo)"`
+				}{},
+				map[string]any{
+					"owner":       githubv4.String("octocat"),
+					"repo":        githubv4.String("my-repo"),
+					"issueNumber": githubv4.Int(42),
+				},
+				githubv4mock.DataResponse(map[string]any{
+					"repository": map[string]any{
+						"issue": map[string]any{
+							"id": "I_issue42",
+						},
+					},
+				}),
+			),
+			// Mock resolveProjectNodeID query for user
+			githubv4mock.NewQueryMatcher(
+				struct {
+					User struct {
+						ProjectV2 struct {
+							ID githubv4.ID
+						} `graphql:"projectV2(number: $projectNumber)"`
+					} `graphql:"user(login: $owner)"`
+				}{},
+				map[string]any{
+					"owner":         githubv4.String("octocat"),
+					"projectNumber": githubv4.Int(1),
+				},
+				githubv4mock.DataResponse(map[string]any{
+					"user": map[string]any{
+						"projectV2": map[string]any{
+							"id": "PVT_project1",
+						},
+					},
+				}),
+			),
+			// Mock addProjectV2ItemById mutation
+			githubv4mock.NewMutationMatcher(
+				struct {
+					AddProjectV2ItemByID struct {
+						Item struct {
+							ID             githubv4.ID
+							FullDatabaseID string `graphql:"fullDatabaseId"`
+						}
+					} `graphql:"addProjectV2ItemById(input: $input)"`
+				}{},
+				githubv4.AddProjectV2ItemByIdInput{
+					ProjectID: githubv4.ID("PVT_project1"),
+					ContentID: githubv4.ID("I_issue42"),
+				},
+				nil,
+				githubv4mock.DataResponse(map[string]any{
+					"addProjectV2ItemById": map[string]any{
+						"item": map[string]any{
+							"id":             "PVTI_item6001",
+							"fullDatabaseId": "6001",
+						},
+					},
+				}),
+			),
+		)
+
+		restClient := MockHTTPClientWithHandlers(map[string]http.HandlerFunc{
+			GetUsersProjectsV2FieldsByUsernameByProject:          mockResponse(t, http.StatusOK, fields),
+			PatchUsersProjectsV2ItemsByUsernameByProjectByItemID: mockResponse(t, http.StatusOK, updatedItem),
+		})
+		client := mustNewGHClient(t, restClient)
+		deps := BaseDeps{
+			Client:    client,
+			GQLClient: githubv4.NewClient(gqlMockedClient),
+		}
+		handler := toolDef.Handler(deps)
+		request := createMCPRequest(map[string]any{
+			"owner":          "octocat",
+			"repo":           "my-repo",
+			"issue_number":   float64(42),
+			"project_owner":  "octocat",
+			"owner_type":     "user",
+			"project_number": float64(1),
+			"status":         "In Progress",
+		})
+
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+
+		textContent := getTextResult(t, result)
+		var response map[string]any
+		require.NoError(t, json.Unmarshal([]byte(textContent.Text), &response))
+		assert.Equal(t, "PVTI_item6001", response["id"])
+		assert.Equal(t, float64(6001), response["item_id"])
+	})
+
+	t.Run("missing required parameter owner returns error", func(t *testing.T) {
+		t.Parallel()
+
+		mockedClient := MockHTTPClientWithHandlers(map[string]http.HandlerFunc{})
+		client := mustNewGHClient(t, mockedClient)
+		deps := BaseDeps{
+			Client:    client,
+			GQLClient: githubv4.NewClient(githubv4mock.NewMockedHTTPClient()),
+		}
+		handler := toolDef.Handler(deps)
+		request := createMCPRequest(map[string]any{
+			"repo":           "my-repo",
+			"issue_number":   float64(42),
+			"project_owner":  "octocat",
+			"project_number": float64(1),
+		})
+
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+
+		require.NoError(t, err)
+		require.True(t, result.IsError)
+		textContent := getTextResult(t, result)
+		assert.Contains(t, textContent.Text, "missing required parameter: owner")
+	})
+}

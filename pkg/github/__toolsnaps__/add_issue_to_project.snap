@@ -1,0 +1,51 @@
+{
+  "annotations": {
+    "title": "Add issue to project"
+  },
+  "description": "Add an issue to a GitHub Project and optionally set its status field in a single call.",
+  "inputSchema": {
+    "properties": {
+      "issue_number": {
+        "description": "The issue number to add to the project.",
+        "type": "number"
+      },
+      "owner": {
+        "description": "The owner of the repository containing the issue.",
+        "type": "string"
+      },
+      "owner_type": {
+        "description": "Project owner type (user or org). If not provided, will be automatically detected.",
+        "enum": [
+          "user",
+          "org"
+        ],
+        "type": "string"
+      },
+      "project_number": {
+        "description": "The project's number.",
+        "type": "number"
+      },
+      "project_owner": {
+        "description": "The owner (user or organization) of the project.",
+        "type": "string"
+      },
+      "repo": {
+        "description": "The repository name containing the issue.",
+        "type": "string"
+      },
+      "status": {
+        "description": "Optional: human-readable status option name to set on the item after adding (e.g. \"In Progress\").",
+        "type": "string"
+      }
+    },
+    "required": [
+      "owner",
+      "repo",
+      "issue_number",
+      "project_owner",
+      "project_number"
+    ],
+    "type": "object"
+  },
+  "name": "add_issue_to_project"
+}
