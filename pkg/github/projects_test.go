@@ -183,6 +183,122 @@ func Test_ProjectsList_ListProjectFields(t *testing.T) {
 		textContent := getTextResult(t, result)
 		assert.Contains(t, textContent.Text, "missing required parameter: project_number")
 	})
+
+	t.Run("success with object-format option names", func(t *testing.T) {
+		t.Parallel()
+		objectFields := []map[string]any{{
+			"id":        101,
+			"name":      "Status",
+			"data_type": "single_select",
+			"options": []map[string]any{{
+				"id":          "opt1",
+				"name":        map[string]any{"name": "Done"},
+				"description": map[string]any{"name": "Completed state"},
+				"color":       "GREEN",
+			}},
+		}}
+		mockedClient := MockHTTPClientWithHandlers(map[string]http.HandlerFunc{
+			GetOrgsProjectsV2FieldsByProject: mockResponse(t, http.StatusOK, objectFields),
+		})
+
+		client := mustNewGHClient(t, mockedClient)
+		deps := BaseDeps{
+			Client: client,
+		}
+		handler := toolDef.Handler(deps)
+		request := createMCPRequest(map[string]any{
+			"method":         "list_project_fields",
+			"owner":          "octo-org",
+			"owner_type":     "org",
+			"project_number": float64(1),
+		})
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+
+		textContent := getTextResult(t, result)
+		var response map[string]any
+		err = json.Unmarshal([]byte(textContent.Text), &response)
+		require.NoError(t, err)
+		fieldsList, ok := response["fields"].([]any)
+		require.True(t, ok)
+		require.Len(t, fieldsList, 1)
+		field, ok := fieldsList[0].(map[string]any)
+		require.True(t, ok)
+		options, ok := field["options"].([]any)
+		require.True(t, ok)
+		require.Len(t, options, 1)
+		opt, ok := options[0].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "Done", opt["name"])
+		assert.Equal(t, "Completed state", opt["description"])
+	})
+
+	t.Run("success with mixed format options", func(t *testing.T) {
+		t.Parallel()
+		mixedFields := []map[string]any{{
+			"id":        102,
+			"name":      "Priority",
+			"data_type": "single_select",
+			"options": []map[string]any{
+				{
+					"id":          "opt1",
+					"name":        "High",
+					"description": "Plain string description",
+					"color":       "RED",
+				},
+				{
+					"id":          "opt2",
+					"name":        map[string]any{"name": "Low"},
+					"description": map[string]any{"name": "Object description"},
+					"color":       "BLUE",
+				},
+			},
+		}}
+		mockedClient := MockHTTPClientWithHandlers(map[string]http.HandlerFunc{
+			GetOrgsProjectsV2FieldsByProject: mockResponse(t, http.StatusOK, mixedFields),
+		})
+
+		client := mustNewGHClient(t, mockedClient)
+		deps := BaseDeps{
+			Client: client,
+		}
+		handler := toolDef.Handler(deps)
+		request := createMCPRequest(map[string]any{
+			"method":         "list_project_fields",
+			"owner":          "octo-org",
+			"owner_type":     "org",
+			"project_number": float64(1),
+		})
+		result, err := handler(ContextWithDeps(context.Background(), deps), &request)
+
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+
+		textContent := getTextResult(t, result)
+		var response map[string]any
+		err = json.Unmarshal([]byte(textContent.Text), &response)
+		require.NoError(t, err)
+		fieldsList, ok := response["fields"].([]any)
+		require.True(t, ok)
+		require.Len(t, fieldsList, 1)
+		field, ok := fieldsList[0].(map[string]any)
+		require.True(t, ok)
+		options, ok := field["options"].([]any)
+		require.True(t, ok)
+		require.Len(t, options, 2)
+
+		opt0, ok := options[0].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "High", opt0["name"])
+		assert.Equal(t, "Plain string description", opt0["description"])
+
+		opt1, ok := options[1].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "Low", opt1["name"])
+		assert.Equal(t, "Object description", opt1["description"])
+	})
 }
 
 func verbosePullRequestProjectItemFixture() map[string]any {
