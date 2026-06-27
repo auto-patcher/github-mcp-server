@@ -51,6 +51,123 @@ const (
 	projectsMethodCreateIterationField      = "create_iteration_field"
 )
 
+// FlexibleString handles JSON fields that the GitHub API may return as either a
+// plain string or as an object with a "name" key (e.g. ProjectV2FieldOption.name
+// changed from string to *ProjectV2TextContent in go-github v79+).
+type FlexibleString string
+
+func (f *FlexibleString) UnmarshalJSON(data []byte) error {
+	// Try plain string first.
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		*f = FlexibleString(s)
+		return nil
+	}
+	// Fall back to object with a "name" key.
+	var obj struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(data, &obj); err == nil {
+		*f = FlexibleString(obj.Name)
+		return nil
+	}
+	return fmt.Errorf("FlexibleString: cannot unmarshal %s", string(data))
+}
+
+// projectFieldOption is a local type for a single-select option, using FlexibleString
+// to handle the go-github v79+ schema change where "name" became an object.
+type projectFieldOption struct {
+	ID          string         `json:"id"`
+	Name        FlexibleString `json:"name"`
+	Color       string         `json:"color"`
+	Description string         `json:"description"`
+}
+
+// projectFieldIteration is a local type for a single iteration entry.
+type projectFieldIteration struct {
+	ID        string `json:"id"`
+	Title     string `json:"title"`
+	StartDate string `json:"startDate"`
+	Duration  int    `json:"duration"`
+}
+
+// projectFieldConfiguration holds the configuration block of an iteration field.
+type projectFieldConfiguration struct {
+	Iterations          []projectFieldIteration `json:"iterations"`
+	CompletedIterations []projectFieldIteration `json:"completedIterations"`
+}
+
+// ProjectField is a local representation of a project field that avoids the
+// go-github v79+ unmarshal bug for ProjectV2FieldOption.name.
+type ProjectField struct {
+	ID            int64                      `json:"id"`
+	NodeID        string                     `json:"node_id,omitempty"`
+	Name          string                     `json:"name,omitempty"`
+	DataType      string                     `json:"data_type,omitempty"`
+	Options       []projectFieldOption       `json:"options,omitempty"`
+	Configuration *projectFieldConfiguration `json:"configuration,omitempty"`
+}
+
+// listProjectFieldsRaw fetches a page of project fields using a raw HTTP request,
+// bypassing the go-github typed structs that fail to unmarshal the GitHub API
+// response for option names when using go-github v79+.
+func listProjectFieldsRaw(ctx context.Context, client *github.Client, owner, ownerType string, projectNumber int, pagination github.ListProjectsPaginationOptions) ([]ProjectField, *github.Response, error) {
+	var urlPath string
+	if ownerType == "org" {
+		urlPath = fmt.Sprintf("orgs/%s/projectsV2/%d/fields", owner, projectNumber)
+	} else {
+		urlPath = fmt.Sprintf("users/%s/projectsV2/%d/fields", owner, projectNumber)
+	}
+
+	// Append pagination query params.
+	sep := "?"
+	if pagination.PerPage > 0 {
+		urlPath += fmt.Sprintf("%sper_page=%d", sep, pagination.PerPage)
+		sep = "&"
+	}
+	if pagination.After != "" {
+		urlPath += fmt.Sprintf("%safter=%s", sep, pagination.After)
+		sep = "&"
+	}
+	if pagination.Before != "" {
+		urlPath += fmt.Sprintf("%sbefore=%s", sep, pagination.Before)
+	}
+
+	req, err := client.NewRequest(ctx, http.MethodGet, urlPath, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var fields []ProjectField
+	resp, err := client.Do(req, &fields)
+	if err != nil {
+		return nil, resp, err
+	}
+	return fields, resp, nil
+}
+
+// getProjectFieldRaw fetches a single project field using a raw HTTP request.
+func getProjectFieldRaw(ctx context.Context, client *github.Client, owner, ownerType string, projectNumber int, fieldID int64) (*ProjectField, *github.Response, error) {
+	var urlPath string
+	if ownerType == "org" {
+		urlPath = fmt.Sprintf("orgs/%s/projectsV2/%d/fields/%d", owner, projectNumber, fieldID)
+	} else {
+		urlPath = fmt.Sprintf("users/%s/projectsV2/%d/fields/%d", owner, projectNumber, fieldID)
+	}
+
+	req, err := client.NewRequest(ctx, http.MethodGet, urlPath, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var field ProjectField
+	resp, err := client.Do(req, &field)
+	if err != nil {
+		return nil, resp, err
+	}
+	return &field, resp, nil
+}
+
 // GraphQL types for ProjectV2 status updates
 
 type statusUpdateNode struct {
@@ -846,19 +963,7 @@ func listProjectFields(ctx context.Context, client *github.Client, args map[stri
 		return utils.NewToolResultError(err.Error()), nil, nil
 	}
 
-	var resp *github.Response
-	var projectFields []*github.ProjectV2Field
-
-	opts := &github.ListProjectsOptions{
-		ListProjectsPaginationOptions: pagination,
-	}
-
-	if ownerType == "org" {
-		projectFields, resp, err = client.Projects.ListOrganizationProjectFields(ctx, owner, projectNumber, opts)
-	} else {
-		projectFields, resp, err = client.Projects.ListUserProjectFields(ctx, owner, projectNumber, opts)
-	}
-
+	projectFields, resp, err := listProjectFieldsRaw(ctx, client, owner, ownerType, projectNumber, pagination)
 	if err != nil {
 		return ghErrors.NewGitHubAPIErrorResponse(ctx,
 			"failed to list project fields",
@@ -997,16 +1102,7 @@ func getProject(ctx context.Context, client *github.Client, owner, ownerType str
 }
 
 func getProjectField(ctx context.Context, client *github.Client, owner, ownerType string, projectNumber int, fieldID int64) (*mcp.CallToolResult, any, error) {
-	var resp *github.Response
-	var projectField *github.ProjectV2Field
-	var err error
-
-	if ownerType == "org" {
-		projectField, resp, err = client.Projects.GetOrganizationProjectField(ctx, owner, projectNumber, fieldID)
-	} else {
-		projectField, resp, err = client.Projects.GetUserProjectField(ctx, owner, projectNumber, fieldID)
-	}
-
+	projectField, resp, err := getProjectFieldRaw(ctx, client, owner, ownerType, projectNumber, fieldID)
 	if err != nil {
 		return ghErrors.NewGitHubAPIErrorResponse(ctx,
 			"failed to get project field",
