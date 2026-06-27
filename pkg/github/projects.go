@@ -78,12 +78,12 @@ func (f *FlexibleString) UnmarshalJSON(data []byte) error {
 }
 
 // projectFieldOption is a local type for a single-select option, using FlexibleString
-// to handle the go-github v79+ schema change where "name" became an object.
+// to handle the go-github v79+ schema change where "name" and "description" became objects.
 type projectFieldOption struct {
 	ID          string         `json:"id"`
 	Name        FlexibleString `json:"name"`
 	Color       string         `json:"color"`
-	Description string         `json:"description"`
+	Description FlexibleString `json:"description"`
 }
 
 // projectFieldIteration is a local type for a single iteration entry.
