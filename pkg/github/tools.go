@@ -218,6 +218,7 @@ func AllTools(t translations.TranslationHelperFunc) []inventory.ServerTool {
 		SubIssueWrite(t),
 		IssueDependencyRead(t),
 		IssueDependencyWrite(t),
+		IssueGraph(t),
 
 		// User tools
 		SearchUsers(t),
