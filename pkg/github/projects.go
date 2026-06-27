@@ -49,6 +49,9 @@ const (
 	projectsMethodCreateProjectStatusUpdate = "create_project_status_update"
 	projectsMethodCreateProject             = "create_project"
 	projectsMethodCreateIterationField      = "create_iteration_field"
+	projectsMethodCreateProjectField        = "create_project_field"
+	projectsMethodAddProjectFieldOption     = "add_project_field_option"
+	projectsMethodDeleteProjectField        = "delete_project_field"
 )
 
 // FlexibleString handles JSON fields that the GitHub API may return as either a
@@ -591,6 +594,9 @@ func ProjectsWrite(t translations.TranslationHelperFunc) inventory.ServerTool {
 							projectsMethodCreateProjectStatusUpdate,
 							projectsMethodCreateProject,
 							projectsMethodCreateIterationField,
+							projectsMethodCreateProjectField,
+							projectsMethodAddProjectFieldOption,
+							projectsMethodDeleteProjectField,
 						},
 					},
 					"owner_type": {
@@ -686,6 +692,35 @@ func ProjectsWrite(t translations.TranslationHelperFunc) inventory.ServerTool {
 							},
 							Required: []string{"title", "start_date", "duration"},
 						},
+					},
+					"field_id": {
+						Type:        "number",
+						Description: "The numeric ID of the project field. Required for 'add_project_field_option' and 'delete_project_field' methods.",
+					},
+					"name": {
+						Type:        "string",
+						Description: "The name of the new field. Required for 'create_project_field' method.",
+					},
+					"data_type": {
+						Type:        "string",
+						Description: "The data type of the new field. Required for 'create_project_field' method.",
+						Enum:        []any{"TEXT", "NUMBER", "DATE", "SINGLE_SELECT", "ITERATION"},
+					},
+					"options": {
+						Type:        "array",
+						Description: "Initial option names for a SINGLE_SELECT field. Optional for 'create_project_field' method.",
+						Items: &jsonschema.Schema{
+							Type: "string",
+						},
+					},
+					"option_name": {
+						Type:        "string",
+						Description: "The name of the new option to add. Required for 'add_project_field_option' method.",
+					},
+					"color": {
+						Type:        "string",
+						Description: "The color for the new single-select option. Optional for 'add_project_field_option' method (default: GRAY).",
+						Enum:        []any{"BLUE", "GREEN", "RED", "YELLOW", "ORANGE", "PINK", "PURPLE", "GRAY"},
 					},
 				},
 				Required: []string{"method", "owner"},
@@ -808,6 +843,31 @@ func ProjectsWrite(t translations.TranslationHelperFunc) inventory.ServerTool {
 				return createProjectStatusUpdate(ctx, gqlClient, owner, ownerType, projectNumber, body, status, startDate, targetDate)
 			case projectsMethodCreateIterationField:
 				return createIterationField(ctx, gqlClient, owner, ownerType, projectNumber, args)
+			case projectsMethodCreateProjectField:
+				return createProjectField(ctx, gqlClient, client, owner, ownerType, projectNumber, args)
+			case projectsMethodAddProjectFieldOption:
+				fieldID, err := RequiredBigInt(args, "field_id")
+				if err != nil {
+					return utils.NewToolResultError(err.Error()), nil, nil
+				}
+				optionName, err := RequiredParam[string](args, "option_name")
+				if err != nil {
+					return utils.NewToolResultError(err.Error()), nil, nil
+				}
+				color, err := OptionalParam[string](args, "color")
+				if err != nil {
+					return utils.NewToolResultError(err.Error()), nil, nil
+				}
+				if color == "" {
+					color = "GRAY"
+				}
+				return addProjectFieldOption(ctx, gqlClient, client, owner, ownerType, projectNumber, fieldID, optionName, color)
+			case projectsMethodDeleteProjectField:
+				fieldID, err := RequiredBigInt(args, "field_id")
+				if err != nil {
+					return utils.NewToolResultError(err.Error()), nil, nil
+				}
+				return deleteProjectField(ctx, gqlClient, client, owner, ownerType, projectNumber, fieldID)
 			default:
 				return utils.NewToolResultError(fmt.Sprintf("unknown method: %s", method)), nil, nil
 			}
@@ -1950,4 +2010,257 @@ func detectOwnerType(ctx context.Context, client *github.Client, owner string, p
 	}
 
 	return "", fmt.Errorf("could not determine owner type for %s with project %d: owner is neither a user nor an org with this project", owner, projectNumber)
+}
+
+// validProjectFieldDataTypes is the set of valid data types for createProjectV2Field.
+var validProjectFieldDataTypes = map[string]bool{
+	"TEXT":          true,
+	"NUMBER":        true,
+	"DATE":          true,
+	"SINGLE_SELECT": true,
+	"ITERATION":     true,
+}
+
+// validSingleSelectColors is the set of valid colors for single-select options.
+var validSingleSelectColors = map[string]bool{
+	"BLUE":   true,
+	"GREEN":  true,
+	"RED":    true,
+	"YELLOW": true,
+	"ORANGE": true,
+	"PINK":   true,
+	"PURPLE": true,
+	"GRAY":   true,
+}
+
+// createProjectField creates a new custom field on a project via GraphQL.
+// For SINGLE_SELECT fields with initial options, it creates the field and then
+// calls addProjectFieldOption for each option.
+func createProjectField(ctx context.Context, gqlClient *githubv4.Client, client *github.Client, owner, ownerType string, projectNumber int, args map[string]any) (*mcp.CallToolResult, any, error) {
+	fieldName, err := RequiredParam[string](args, "name")
+	if err != nil {
+		return utils.NewToolResultError(err.Error()), nil, nil
+	}
+	dataType, err := RequiredParam[string](args, "data_type")
+	if err != nil {
+		return utils.NewToolResultError(err.Error()), nil, nil
+	}
+	if !validProjectFieldDataTypes[dataType] {
+		return utils.NewToolResultError(fmt.Sprintf("invalid data_type %q: must be one of TEXT, NUMBER, DATE, SINGLE_SELECT, ITERATION", dataType)), nil, nil
+	}
+
+	projectID, err := resolveProjectNodeID(ctx, gqlClient, owner, ownerType, projectNumber)
+	if err != nil {
+		return utils.NewToolResultError(fmt.Sprintf("failed to get project ID: %v", err)), nil, nil
+	}
+
+	var createMutation struct {
+		CreateProjectV2Field struct {
+			ProjectV2Field struct {
+				ProjectV2Field struct {
+					ID       string
+					Name     string
+					DataType string
+				} `graphql:"... on ProjectV2Field"`
+				ProjectV2SingleSelectField struct {
+					ID      string
+					Name    string
+					Options []struct {
+						ID   string
+						Name string
+					}
+				} `graphql:"... on ProjectV2SingleSelectField"`
+			} `graphql:"projectV2Field"`
+		} `graphql:"createProjectV2Field(input: $input)"`
+	}
+
+	createInput := githubv4.CreateProjectV2FieldInput{
+		ProjectID: githubv4.ID(projectID),
+		DataType:  githubv4.ProjectV2CustomFieldType(dataType),
+		Name:      githubv4.String(fieldName),
+	}
+
+	err = gqlClient.Mutate(ctx, &createMutation, createInput, nil)
+	if err != nil {
+		return utils.NewToolResultError(fmt.Sprintf("failed to create project field: %v", err)), nil, nil
+	}
+
+	// Determine the created field ID for subsequent option additions.
+	createdFieldNodeID := createMutation.CreateProjectV2Field.ProjectV2Field.ProjectV2Field.ID
+	if createdFieldNodeID == "" {
+		createdFieldNodeID = createMutation.CreateProjectV2Field.ProjectV2Field.ProjectV2SingleSelectField.ID
+	}
+
+	// For SINGLE_SELECT fields, add any initial options.
+	if dataType == "SINGLE_SELECT" && createdFieldNodeID != "" {
+		var optionNames []string
+		if raw, ok := args["options"].([]any); ok {
+			for _, v := range raw {
+				if s, ok := v.(string); ok && s != "" {
+					optionNames = append(optionNames, s)
+				}
+			}
+		}
+		for _, optName := range optionNames {
+			_, _, err := addProjectFieldOptionByNodeID(ctx, gqlClient, createdFieldNodeID, optName, "GRAY")
+			if err != nil {
+				return utils.NewToolResultError(fmt.Sprintf("field created but failed to add option %q: %v", optName, err)), nil, nil
+			}
+		}
+	}
+
+	// Re-fetch the field to return up-to-date data including any new options.
+	// Use the REST API for consistent output format.
+	fields, _, fetchErr := listProjectFieldsRaw(ctx, client, owner, ownerType, projectNumber, github.ListProjectsPaginationOptions{PerPage: MaxProjectsPerPage})
+	if fetchErr == nil {
+		for _, f := range fields {
+			if f.Name == fieldName {
+				r, err := json.Marshal(f)
+				if err != nil {
+					return nil, nil, fmt.Errorf("failed to marshal response: %w", err)
+				}
+				return utils.NewToolResultText(string(r)), nil, nil
+			}
+		}
+	}
+
+	// Fallback: return what we got from the mutation.
+	result := map[string]any{
+		"id":        createdFieldNodeID,
+		"name":      fieldName,
+		"data_type": dataType,
+	}
+	if ssf := createMutation.CreateProjectV2Field.ProjectV2Field.ProjectV2SingleSelectField; ssf.ID != "" {
+		opts := make([]map[string]any, 0, len(ssf.Options))
+		for _, o := range ssf.Options {
+			opts = append(opts, map[string]any{"id": o.ID, "name": o.Name})
+		}
+		result["options"] = opts
+	}
+	return MarshalledTextResult(result), nil, nil
+}
+
+// addProjectFieldOptionByNodeID adds a new option to a single-select field given its GraphQL node ID.
+func addProjectFieldOptionByNodeID(ctx context.Context, gqlClient *githubv4.Client, fieldNodeID, optionName, color string) (string, []map[string]any, error) {
+	var mutation struct {
+		AddProjectV2SingleSelectFieldOption struct {
+			ProjectV2SingleSelectField struct {
+				ID      string
+				Name    string
+				Options []struct {
+					ID    string
+					Name  string
+					Color string
+				}
+			}
+		} `graphql:"addProjectV2SingleSelectFieldOption(input: $input)"`
+	}
+
+	input := AddProjectV2SingleSelectFieldOptionInput{
+		FieldID: githubv4.ID(fieldNodeID),
+		Name:    githubv4.String(optionName),
+		Color:   githubv4.String(color),
+	}
+
+	err := gqlClient.Mutate(ctx, &mutation, input, nil)
+	if err != nil {
+		return "", nil, err
+	}
+
+	opts := make([]map[string]any, 0)
+	for _, o := range mutation.AddProjectV2SingleSelectFieldOption.ProjectV2SingleSelectField.Options {
+		opts = append(opts, map[string]any{"id": o.ID, "name": o.Name, "color": o.Color})
+	}
+	return mutation.AddProjectV2SingleSelectFieldOption.ProjectV2SingleSelectField.ID, opts, nil
+}
+
+// addProjectFieldOption resolves a field's node_id from its numeric id and adds a new option.
+func addProjectFieldOption(ctx context.Context, gqlClient *githubv4.Client, client *github.Client, owner, ownerType string, projectNumber int, fieldID int64, optionName, color string) (*mcp.CallToolResult, any, error) {
+	if !validSingleSelectColors[color] {
+		return utils.NewToolResultError(fmt.Sprintf("invalid color %q: must be one of BLUE, GREEN, RED, YELLOW, ORANGE, PINK, PURPLE, GRAY", color)), nil, nil
+	}
+
+	// Fetch fields to find the node_id for the given numeric field_id.
+	fields, resp, err := listProjectFieldsRaw(ctx, client, owner, ownerType, projectNumber, github.ListProjectsPaginationOptions{PerPage: MaxProjectsPerPage})
+	if err != nil {
+		return utils.NewToolResultError(fmt.Sprintf("failed to list project fields: %v", err)), nil, nil
+	}
+	if resp != nil && resp.Body != nil {
+		defer func() { _ = resp.Body.Close() }()
+	}
+
+	var fieldNodeID string
+	for _, f := range fields {
+		if f.ID == fieldID {
+			fieldNodeID = f.NodeID
+			break
+		}
+	}
+	if fieldNodeID == "" {
+		return utils.NewToolResultError(fmt.Sprintf("field with id %d not found in project", fieldID)), nil, nil
+	}
+
+	_, opts, err := addProjectFieldOptionByNodeID(ctx, gqlClient, fieldNodeID, optionName, color)
+	if err != nil {
+		return utils.NewToolResultError(fmt.Sprintf("failed to add project field option: %v", err)), nil, nil
+	}
+
+	result := map[string]any{
+		"field_id": fieldID,
+		"options":  opts,
+	}
+	return MarshalledTextResult(result), nil, nil
+}
+
+// deleteProjectField deletes a project field by its numeric id.
+func deleteProjectField(ctx context.Context, gqlClient *githubv4.Client, client *github.Client, owner, ownerType string, projectNumber int, fieldID int64) (*mcp.CallToolResult, any, error) {
+	// Fetch fields to find the node_id for the given numeric field_id.
+	fields, resp, err := listProjectFieldsRaw(ctx, client, owner, ownerType, projectNumber, github.ListProjectsPaginationOptions{PerPage: MaxProjectsPerPage})
+	if err != nil {
+		return utils.NewToolResultError(fmt.Sprintf("failed to list project fields: %v", err)), nil, nil
+	}
+	if resp != nil && resp.Body != nil {
+		defer func() { _ = resp.Body.Close() }()
+	}
+
+	var fieldNodeID string
+	for _, f := range fields {
+		if f.ID == fieldID {
+			fieldNodeID = f.NodeID
+			break
+		}
+	}
+	if fieldNodeID == "" {
+		return utils.NewToolResultError(fmt.Sprintf("field with id %d not found in project", fieldID)), nil, nil
+	}
+
+	var mutation struct {
+		DeleteProjectV2Field struct {
+			ClientMutationID *string
+		} `graphql:"deleteProjectV2Field(input: $input)"`
+	}
+
+	input := DeleteProjectV2FieldInput{
+		FieldID: githubv4.ID(fieldNodeID),
+	}
+
+	err = gqlClient.Mutate(ctx, &mutation, input, nil)
+	if err != nil {
+		return utils.NewToolResultError(fmt.Sprintf("failed to delete project field: %v", err)), nil, nil
+	}
+
+	return utils.NewToolResultText("project field successfully deleted"), nil, nil
+}
+
+// AddProjectV2SingleSelectFieldOptionInput is the GraphQL input for the
+// addProjectV2SingleSelectFieldOption mutation.
+type AddProjectV2SingleSelectFieldOptionInput struct {
+	FieldID githubv4.ID     `json:"fieldId"`
+	Name    githubv4.String `json:"name"`
+	Color   githubv4.String `json:"color"`
+}
+
+// DeleteProjectV2FieldInput is the GraphQL input for the deleteProjectV2Field mutation.
+type DeleteProjectV2FieldInput struct {
+	FieldID githubv4.ID `json:"fieldId"`
 }
