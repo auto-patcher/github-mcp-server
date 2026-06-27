@@ -28,8 +28,8 @@ Prefers consolidated operations over granular ones where it reduces the number o
 
 Structurally identical to upstream — same package layout (`cmd/`, `internal/`, `pkg/`, `e2e/`, `script/`), same dependencies, no replaced modules. Fork divergences are additive: new tool implementations live alongside existing ones in the `pkg/github/` handler files, following the existing `ProjectsWrite` consolidated handler pattern. GraphQL node IDs are resolved at call time from numeric IDs or owner/name — never stored.
 
-What this fork adds on top of `v1.4.0` (tagged `v1.4.0-patch-1`):
-- `FlexibleString` — fixes JSON unmarshal crash in `list_project_fields` / `get_project_field` when GitHub returns option `name`/`description` as objects (backport of upstream #1490)
+What this fork adds on top of `v1.4.0` (tagged `v1.4.0-patch-2`):
+- `FlexibleString` — fixes JSON unmarshal crash in `list_project_fields` / `get_project_field` when GitHub returns option `name`/`description` as objects (backport of upstream #1490); tests in `projects_flexible_string_test.go`
 - `create_project_field`, `add_project_field_option`, `delete_project_field` — GraphQL mutations for project field write ops
 - `issue_graph` — BFS traversal from an issue across sub-issues, body refs, and timeline cross-references; classifies nodes as `epic`/`batch`/`task`/`pr`
 - `set_project_item_status` — sets a project item's status by human-readable option name
